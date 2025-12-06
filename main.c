@@ -220,7 +220,6 @@ void ocaml_compile_run_clean(char *file, char *compilation_args, bool clean) {
     }
 
     if(clean) {
-        // this is intended to no clean .cmi and .cmo files for now, will eventually be changes later
         printf("%s=> Cleaning %s%s\n", C_CYAN, OUT, C_RESET);
         char *clean_command = malloc((strlen(OUT) + 4)*sizeof(char));
         strcpy(clean_command, "rm ");
@@ -231,6 +230,33 @@ void ocaml_compile_run_clean(char *file, char *compilation_args, bool clean) {
         if(clean_response != 0) {
             fprintf(stderr, "%s%s[ERROR] Failed to clean the file after execution.%s\n", C_RED, C_BOLD, C_RESET);
         }
+
+	char *clean_cmo_cmi = malloc(strlen(file)*sizeof(char) + 5);
+	strcpy(clean_cmo_cmi, "rm ");
+
+	int file_len = strlen(file);
+	file[file_len - 1] = 'm';
+	file[file_len - 2] = 'c';
+	strcat(clean_cmo_cmi, file);
+	
+	
+	char *clean_cmo = malloc(strlen(file)*sizeof(char) + 5);
+	strcpy(clean_cmo, clean_cmo_cmi);
+	strcat(clean_cmo, "o");
+	int clean_cmo_response = system(clean_cmo);
+	free(clean_cmo);
+	if(clean_cmo_response != 0) {
+            fprintf(stderr, "%s%s[ERROR] Failed to clean the file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+	}
+
+	char *clean_cmi = malloc(strlen(file)*sizeof(char) + 5);
+	strcpy(clean_cmi, clean_cmo_cmi);
+	strcat(clean_cmi, "i");
+	int clean_cmi_response = system(clean_cmi);
+	free(clean_cmi);
+	if(clean_cmi_response != 0) {
+            fprintf(stderr, "%s%s[ERROR] Failed to clean the file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+	}
     }
 
     printf("%s%s[SUCCESS] All operations went fine.%s\n", C_GREEN, C_BOLD, C_RESET);
