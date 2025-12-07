@@ -6,7 +6,7 @@ SRC = main.c
 OUT = occec
 
 build: 
-	$(CC) $(SRC) -o $(OUT) $(flags)
+	$(CC) $(SRC) -o $(OUT) $(FLAGS)
 
 prod:
 	$(CC) $(SRC) -o $(OUT)
