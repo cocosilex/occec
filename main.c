@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <unistd.h>
 
 #define C_COMPILER "clang"
 #define ML_COMPILER "ocamlc"
@@ -18,14 +20,28 @@
 
 char *custom_args[1] = {"--no-clear"};
 
+void handle_sigint(int);
 void filter_args(int n, char**args, char **file, char **occec_args, char **compilation_args);
 char *add_arg(char *dest, char *arg);
 int get_mode(char *file);
 char *build_compilation_command(char *compiler, char *file, char *compilation_args, char *base_args);
-void c_compile_run_clean(char *file, char *compilation_args, bool clean);
-void ocaml_compile_run_clean(char *file, char *compilation_args, bool clean);
+void rm_compiled_code(void);
+int c_compile_run_clean(char *file, char *compilation_args, bool clean);
+int ocaml_compile_run_clean(char *file, char *compilation_args, bool clean);
+
+// 0 = processing args, 1 = building, 2 = executing, 3 = cleaning
+volatile sig_atomic_t state = 0;
 
 int main(int argc, char **argv) {
+    struct sigaction sa;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("Error setting up signal handler");
+        return 1;
+    }
+
     bool clean = true;
     int mode = 0; // 0 for C, 1 for Ocaml
 
@@ -51,15 +67,36 @@ int main(int argc, char **argv) {
         clean = false;
     }
 
+    state = 1;
+    int result;
     if(mode == 0) {
-        c_compile_run_clean(file, compilation_args, clean);
+        result = c_compile_run_clean(file, compilation_args, clean);
     } else {
-        //printf("[INFO] Ocaml is not implemented for now.\n");
-        ocaml_compile_run_clean(file, compilation_args, clean);
+        result = ocaml_compile_run_clean(file, compilation_args, clean);
     }
 
     free(compilation_args);
+    if(result == 0) {
+        printf("%s%s[SUCCESS] All operations went fine.%s\n", C_GREEN, C_BOLD, C_RESET);
+    } else if(result == -1) {
+        printf("%s%s[FAILURE] Something went wrong, check console output.%s\n", C_GREEN, C_BOLD, C_RESET);
+    }
+
     return 0;
+}
+
+void handle_sigint(int sig) {
+    (void)sig; 
+
+    const char msg[] = "\n" C_RED C_BOLD "[TERMINATION] Interrupted! Cleaning up..." C_RESET "\n";
+    write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    
+    if(state == 2 || state == 3) {
+        unlink(OUT); 
+        // will clean .cmo/.cmi file later
+    }
+
+    _exit(130); 
 }
 
 void filter_args(int n, char **args, char **file, char **occec_args, char **compilation_args) {
@@ -98,7 +135,7 @@ char *add_arg(char *dest, char *arg) {
     char *new_dest = realloc(dest, new_len);
     if(new_dest == NULL) {
         free(new_dest);
-        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed (it's very sad :/), retry!%s\n", C_RED, C_BOLD, C_RESET);
+        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
         return NULL;
     }
 
@@ -124,6 +161,7 @@ int get_mode(char *file) {
     if(file[file_name_len - 1] == 'l' && file[file_name_len - 2] == 'm' && file[file_name_len - 3] == '.') {
         return 1;
     }
+
     return -1;
 }
 
@@ -138,6 +176,10 @@ char *build_compilation_command(char *compiler, char *file, char *compilation_ar
     }
 
     char *compilation_command = malloc(total_len*sizeof(char));
+    if(compilation_command == NULL) {
+        return NULL;
+    }
+
     strcpy(compilation_command, compiler);
     strcat(compilation_command, " ");
     strcat(compilation_command, file);
@@ -152,112 +194,150 @@ char *build_compilation_command(char *compiler, char *file, char *compilation_ar
     return compilation_command;
 }
 
-void c_compile_run_clean(char *file, char *compilation_args, bool clean) {
+void rm_compiled_code(void) {
+        int clean_response = remove(OUT);
+        if(clean_response != 0) {
+            fprintf(stderr, "%s%s[ERROR] Failed to clean the compiled.code file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+        }
+}
+
+int c_compile_run_clean(char *file, char *compilation_args, bool clean) {
     char *useful_c_args = "-Wall -Wextra -fsanitize=address";
     char *compilation_command = build_compilation_command(C_COMPILER, file, compilation_args, useful_c_args);
+    if(compilation_command == NULL) { 
+        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+        return -1;
+    }
 
     printf("%s=> Compiling %s into %s%s\n", C_CYAN, file, OUT, C_RESET);
     int compilation_response = system(compilation_command);
     free(compilation_command);
-
-    if(compilation_response != 0) {
+    
+    if (WIFSIGNALED(compilation_response) && (WTERMSIG(compilation_response) == SIGINT)) {
+        handle_sigint(2);
+    } else if(compilation_response != 0) {
         fprintf(stderr, "%s%s[ERROR] Compilation failed%s\n", C_RED, C_BOLD, C_RESET);
-        return;
+        return -1;
     }
+
+    state = 2;
 
     printf("%s=> Executing %s%s\n", C_CYAN, OUT, C_RESET);
     char *execution_command = malloc((strlen(OUT) + 3)*sizeof(char));
+    if(execution_command == NULL) { 
+        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+        return -1;
+    }
     strcpy(execution_command, "./");
     strcat(execution_command, OUT);
 
     int execution_response = system(execution_command);
     free(execution_command);
-    if(execution_response != 0) {
+    if (WIFSIGNALED(execution_response) && (WTERMSIG(execution_response) == SIGINT)) {
+        handle_sigint(2);
+    } else if(execution_response != 0) {
         fprintf(stderr, "%s%s[ERROR] Failed to execute the compiled code.%s\n", C_RED, C_BOLD, C_RESET);
-        return;
+        return -1;
     }
 
     if(clean) {
+        state = 3;
         printf("%s=> Cleaning %s%s\n", C_CYAN, OUT, C_RESET);
-        char *clean_command = malloc((strlen(OUT) + 4)*sizeof(char));
-        strcpy(clean_command, "rm ");
-        strcat(clean_command, OUT);
-
-        int clean_response = system(clean_command);
-        free(clean_command);
-        if(clean_response != 0) {
-            fprintf(stderr, "%s%s[ERROR] Failed to clean the file after execution.%s\n", C_RED, C_BOLD, C_RESET);
-        }
+        rm_compiled_code();
     }
 
-    printf("%s%s[SUCCESS] All operations went fine.%s\n", C_GREEN, C_BOLD, C_RESET);
+    return 0;
 }
 
-void ocaml_compile_run_clean(char *file, char *compilation_args, bool clean) {
-    char *useful_c_args = "";
-    char *compilation_command = build_compilation_command(ML_COMPILER, file, compilation_args, useful_c_args);
+int ocaml_compile_run_clean(char *file, char *compilation_args, bool clean) {
+    char *useful_ml_args = "- w + A";
+    char *compilation_command = build_compilation_command(ML_COMPILER, file, compilation_args, useful_ml_args);
+    if(compilation_command == NULL) { 
+        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+        return -1;
+    }
 
     printf("%s=> Compiling %s into %s%s\n", C_CYAN, file, OUT, C_RESET);
     int compilation_response = system(compilation_command);
     free(compilation_command);
 
-    if(compilation_response != 0) {
+    if (WIFSIGNALED(compilation_response) && (WTERMSIG(compilation_response) == SIGINT)) {
+        handle_sigint(2);
+    } else if(compilation_response != 0) {
         fprintf(stderr, "%s%s[ERROR] Compilation failed%s\n", C_RED, C_BOLD, C_RESET);
-        return;
+        return -1;
     }
+
+    state = 2;
 
     printf("%s=> Executing %s%s\n", C_CYAN, OUT, C_RESET);
     char *execution_command = malloc((strlen(OUT) + strlen(ML_RUN) + 2)*sizeof(char));
+    if(execution_command == NULL) { 
+        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+        return -1;
+    }
     strcpy(execution_command, ML_RUN);
     strcat(execution_command, " ");
     strcat(execution_command, OUT);
 
     int execution_response = system(execution_command);
     free(execution_command);
-    if(execution_response != 0) {
+    if (WIFSIGNALED(execution_response) && (WTERMSIG(execution_response) == SIGINT)) {
+        handle_sigint(2);
+    } else if(execution_response != 0) {
         fprintf(stderr, "%s%s[ERROR] Failed to execute the compiled code.%s\n", C_RED, C_BOLD, C_RESET);
-        return;
+        return -1;
     }
 
     if(clean) {
+        state = 3;
+
         printf("%s=> Cleaning %s%s\n", C_CYAN, OUT, C_RESET);
-        char *clean_command = malloc((strlen(OUT) + 4)*sizeof(char));
-        strcpy(clean_command, "rm ");
-        strcat(clean_command, OUT);
+        rm_compiled_code();
 
-        int clean_response = system(clean_command);
-        free(clean_command);
-        if(clean_response != 0) {
-            fprintf(stderr, "%s%s[ERROR] Failed to clean the file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+	    char *clean_cmo_cmi = malloc(strlen(file)*sizeof(char) + 2);
+        if(clean_cmo_cmi == NULL) { 
+            fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+            return -1;
         }
-
-	    char *clean_cmo_cmi = malloc(strlen(file)*sizeof(char) + 5);
-	    strcpy(clean_cmo_cmi, "rm ");
 
 	    int file_len = strlen(file);
 	    file[file_len - 1] = 'm';
 	    file[file_len - 2] = 'c';
-	    strcat(clean_cmo_cmi, file);
+	    strcpy(clean_cmo_cmi, file);
 	
-	    char *clean_cmo = malloc(strlen(file)*sizeof(char) + 5);
+	    char *clean_cmo = malloc(strlen(file)*sizeof(char) + 2);
+        if(clean_cmo == NULL) { 
+            fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+            return -1;
+        }
+
 	    strcpy(clean_cmo, clean_cmo_cmi);
 	    strcat(clean_cmo, "o");
-	    int clean_cmo_response = system(clean_cmo);
+
+	    int clean_cmo_response = remove(clean_cmo);
 	    free(clean_cmo);
 	    if(clean_cmo_response != 0) {
-            fprintf(stderr, "%s%s[ERROR] Failed to clean the file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+            fprintf(stderr, "%s%s[ERROR] Failed to clean the .cmo file after execution.%s\n", C_RED, C_BOLD, C_RESET);
 	    }
 
-	    char *clean_cmi = malloc(strlen(file)*sizeof(char) + 5);
+	    char *clean_cmi = malloc(strlen(file)*sizeof(char) + 2);
+        if(clean_cmi == NULL) { 
+            fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+            return -1;
+        }
 	    strcpy(clean_cmi, clean_cmo_cmi);
 	    strcat(clean_cmi, "i");
-	    int clean_cmi_response = system(clean_cmi);
+
+	    int clean_cmi_response = remove(clean_cmi);
 	    free(clean_cmi);
 	    if(clean_cmi_response != 0) {
-            fprintf(stderr, "%s%s[ERROR] Failed to clean the file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+            fprintf(stderr, "%s%s[ERROR] Failed to clean the .cmi file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+            return -1;
 	    } 
+
         free(clean_cmo_cmi);
     }
 
-    printf("%s%s[SUCCESS] All operations went fine.%s\n", C_GREEN, C_BOLD, C_RESET);
+    return 0;
 }
