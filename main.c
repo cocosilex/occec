@@ -250,7 +250,7 @@ int c_compile_run_clean(char *file, char *compilation_args, bool clean) {
 }
 
 int ocaml_compile_run_clean(char *file, char *compilation_args, bool clean) {
-    char *useful_ml_args = "- w + A";
+    char *useful_ml_args = "";
     char *compilation_command = build_compilation_command(ML_COMPILER, file, compilation_args, useful_ml_args);
     if(compilation_command == NULL) { 
         fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
