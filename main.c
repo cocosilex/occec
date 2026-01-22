@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define C_COMPILER "clang"
@@ -18,13 +19,22 @@
 #define C_CYAN "\033[36m"
 #define C_RED "\033[31m"
 
+#define LOG_GENERAL_ERROR(msg) \
+do { \
+    fputs(C_BOLD C_RED "[ERROR] " msg C_RESET "\n", stderr); \
+} while(0)
+
+#define LOG_MEMORY_ALLOCATION_FAILED LOG_GENERAL_ERROR("Memory allocation failed.")
+
 char *custom_args[1] = {"--no-clear"};
 
 void handle_sigint(int);
-void filter_args(int n, char**args, char **file, char **occec_args, char **compilation_args);
+bool fork_exec(char *command, char **args);
+void filter_args(int n, char **args, char **file, char **occec_args, char **compilation_args);
 char *add_arg(char *dest, char *arg);
 int get_mode(char *file);
-char *build_compilation_command(char *compiler, char *file, char *compilation_args, char *base_args);
+char **build_compilation_args(char *file, char *compiler, char *compilation_args, char *base_args);
+void free_args(char **args);
 void rm_compiled_code(void);
 int c_compile_run_clean(char *file, char *compilation_args, bool clean);
 int ocaml_compile_run_clean(char *file, char *compilation_args, bool clean);
@@ -51,7 +61,7 @@ int main(int argc, char **argv) {
     filter_args(argc, argv, &file, &occec_args, &compilation_args);
 
     if(file == NULL) {
-        fprintf(stderr, "%s%s[ERROR] No file provided... please retry with one.%s\n", C_RED, C_BOLD, C_RESET);
+        LOG_GENERAL_ERROR("No file provided... retry with one.");
         exit(1);
     }
 
@@ -59,7 +69,7 @@ int main(int argc, char **argv) {
 
     if(mode == -1) {
         free(compilation_args);
-        fprintf(stderr, "%s%s[ERROR] Only .c and .ml extensions are supported, the file provided is not valid.%s\n", C_RED, C_BOLD, C_RESET);
+        LOG_GENERAL_ERROR("Only .c and .ml files are supported, the provided fine extension is not valid.");
         exit(0);
     }
 
@@ -77,9 +87,9 @@ int main(int argc, char **argv) {
 
     free(compilation_args);
     if(result == 0) {
-        printf("%s%s[SUCCESS] All operations went fine.%s\n", C_GREEN, C_BOLD, C_RESET);
+        fputs(C_BOLD C_GREEN "[SUCCESS] All operations went fine." C_RESET "\n", stdout);
     } else if(result == -1) {
-        printf("%s%s[FAILURE] Something went wrong, check console output.%s\n", C_GREEN, C_BOLD, C_RESET);
+        fputs(C_BOLD C_RED "[FAILURE] Something went wrong, check console output." C_RESET "\n", stdout);
     }
 
     return 0;
@@ -99,18 +109,41 @@ void handle_sigint(int sig) {
     _exit(130); 
 }
 
+bool fork_exec(char *command, char **args) {
+    pid_t pid = fork();
+
+    if(pid == -1) {
+        perror("Fork Failed");
+        return false;
+    } else if(pid == 0) {
+        execvp(command, args);
+
+        perror("Exec failed, exiting");
+        _exit(1);
+    }
+
+    int process_status;
+    waitpid(pid, &process_status,0);
+
+    if (WIFEXITED(process_status) && WEXITSTATUS(process_status) == 0) {
+        return true;
+    }
+
+    return false;
+}
+
 void filter_args(int n, char **args, char **file, char **occec_args, char **compilation_args) {
     for(int i = 1; i < n; i++) {
         if(args[i][0] != '-') {
             if(*file == NULL) {
                 *file = args[i];
             } else {
-                fprintf(stderr, "%s%s[ERROR] Passing more than one file is not supported!%s\n", C_RED, C_BOLD, C_RESET);
+                LOG_GENERAL_ERROR("Passing more than one file is not supported!");
                 free(*compilation_args);
                 exit(1);
             }
         } else if(args[i][0] == '-' && args[i][1] == 'o' && args[i][2] == '\0') {
-            fprintf(stderr, "%s%s[ERROR] Avoid using the -o flag, output is always named %s%s\n", C_RED, C_BOLD, OUT, C_RESET);
+            fputs(C_BOLD C_RED "[ERROR] Avoid using the -o flag, output is always named " OUT "." C_RESET "\n", stderr);
             free(*compilation_args);
             exit(1);
         } else {
@@ -135,7 +168,7 @@ char *add_arg(char *dest, char *arg) {
     char *new_dest = realloc(dest, new_len);
     if(new_dest == NULL) {
         free(new_dest);
-        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+        LOG_MEMORY_ALLOCATION_FAILED;
         return NULL;
     }
 
@@ -165,84 +198,87 @@ int get_mode(char *file) {
     return -1;
 }
 
-char *build_compilation_command(char *compiler, char *file, char *compilation_args, char *base_args) {
-    unsigned long total_len = strlen(compiler) + strlen(file) + strlen(base_args) + strlen(OUT)+ 4;
-    
-    char *output_arg = " -o ";
-    total_len += 4;    
-
-    if(compilation_args != NULL) {
-        total_len += strlen(compilation_args) + 1;
-    }
-
-    char *compilation_command = malloc(total_len*sizeof(char));
-    if(compilation_command == NULL) {
+char **build_compilation_args(char *file, char *compiler, char *compilation_args, char *base_args) {
+    int max_args = 7;
+    char **args = malloc(max_args * sizeof(char *));
+    if(args == NULL) {
         return NULL;
     }
 
-    strcpy(compilation_command, compiler);
-    strcat(compilation_command, " ");
-    strcat(compilation_command, file);
-    strcat(compilation_command, output_arg);
-    strcat(compilation_command, OUT);
-    strcat(compilation_command, " ");
-    strcat(compilation_command, base_args);
-    strcat(compilation_command, " ");
+    int i = 0;
+    args[i++] = strdup(compiler);
+    args[i++] = strdup(file);
+    args[i++] = strdup("-o");
+    args[i++] = strdup(OUT);
+
+    args[i++] = strdup(base_args);
     if(compilation_args != NULL) {
-        strcat(compilation_command, compilation_args);
+        args[i++] = strdup(compilation_args);
     }
-    return compilation_command;
+
+    args[i] = NULL;
+    return args;
+}
+
+void free_args(char **args) {
+    if(args == NULL) return;
+
+    for(unsigned i = 0; args[i] != NULL; i++) {
+        free(args[i]);
+    }
+
+    free(args);
+    return;
 }
 
 void rm_compiled_code(void) {
         int clean_response = remove(OUT);
         if(clean_response != 0) {
-            fprintf(stderr, "%s%s[ERROR] Failed to clean the compiled.code file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+            LOG_GENERAL_ERROR("Failed to clean " OUT " file after execution");
         }
 }
 
 int c_compile_run_clean(char *file, char *compilation_args, bool clean) {
     char *useful_c_args = "-Wall -Wextra -fsanitize=address";
-    char *compilation_command = build_compilation_command(C_COMPILER, file, compilation_args, useful_c_args);
-    if(compilation_command == NULL) { 
-        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+
+    char **compilation_command = build_compilation_args(file, C_COMPILER, compilation_args, useful_c_args);
+    if(compilation_command == NULL) {
+        LOG_MEMORY_ALLOCATION_FAILED; 
         return -1;
     }
 
-    printf("%s=> Compiling %s into %s%s\n", C_CYAN, file, OUT, C_RESET);
-    int compilation_response = system(compilation_command);
-    free(compilation_command);
+    printf(C_CYAN "=> Compiling %s into " OUT C_RESET "\n", file);
+    bool compilation_success = fork_exec(C_COMPILER, compilation_command);
+    free_args(compilation_command);
     
-    if (WIFSIGNALED(compilation_response) && (WTERMSIG(compilation_response) == SIGINT)) {
-        handle_sigint(2);
-    } else if(compilation_response != 0) {
-        fprintf(stderr, "%s%s[ERROR] Compilation failed%s\n", C_RED, C_BOLD, C_RESET);
+    if(!compilation_success) {
+        LOG_GENERAL_ERROR("Compilation failed.");
         return -1;
     }
 
     state = 2;
 
-    printf("%s=> Executing %s%s\n", C_CYAN, OUT, C_RESET);
-    char *execution_command = malloc((strlen(OUT) + 3)*sizeof(char));
+    fputs(C_CYAN "=> Executing " OUT C_RESET "\n", stdout);
+    char *execution_command= malloc((strlen(OUT) + 3) * sizeof(char));
     if(execution_command == NULL) { 
-        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+        LOG_MEMORY_ALLOCATION_FAILED;
         return -1;
     }
+
     strcpy(execution_command, "./");
     strcat(execution_command, OUT);
 
-    int execution_response = system(execution_command);
+    bool execution_success = fork_exec(execution_command, (char*[]){execution_command, NULL});
     free(execution_command);
-    if (WIFSIGNALED(execution_response) && (WTERMSIG(execution_response) == SIGINT)) {
-        handle_sigint(2);
-    } else if(execution_response != 0) {
-        fprintf(stderr, "%s%s[ERROR] Failed to execute the compiled code.%s\n", C_RED, C_BOLD, C_RESET);
+
+    if(!execution_success) {
+        LOG_GENERAL_ERROR("Failed to execute " OUT ".");
         return -1;
     }
 
     if(clean) {
         state = 3;
-        printf("%s=> Cleaning %s%s\n", C_CYAN, OUT, C_RESET);
+        fputs(C_CYAN "=> Cleaning " OUT C_RESET "\n", stdout);
         rm_compiled_code();
     }
 
@@ -251,92 +287,64 @@ int c_compile_run_clean(char *file, char *compilation_args, bool clean) {
 
 int ocaml_compile_run_clean(char *file, char *compilation_args, bool clean) {
     char *useful_ml_args = "";
-    char *compilation_command = build_compilation_command(ML_COMPILER, file, compilation_args, useful_ml_args);
+    char **compilation_command = build_compilation_args(file, ML_COMPILER, compilation_args, useful_ml_args);
     if(compilation_command == NULL) { 
-        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+        LOG_MEMORY_ALLOCATION_FAILED;
         return -1;
     }
 
-    printf("%s=> Compiling %s into %s%s\n", C_CYAN, file, OUT, C_RESET);
-    int compilation_response = system(compilation_command);
-    free(compilation_command);
+    printf(C_CYAN "=> Compiling %s into " OUT C_RESET "\n", file);
+    bool compilation_success = fork_exec(ML_COMPILER, compilation_command);
+    free_args(compilation_command);
 
-    if (WIFSIGNALED(compilation_response) && (WTERMSIG(compilation_response) == SIGINT)) {
-        handle_sigint(2);
-    } else if(compilation_response != 0) {
-        fprintf(stderr, "%s%s[ERROR] Compilation failed%s\n", C_RED, C_BOLD, C_RESET);
+    if(!compilation_success) {
+        LOG_GENERAL_ERROR("Compilation failed.");
         return -1;
     }
 
     state = 2;
 
-    printf("%s=> Executing %s%s\n", C_CYAN, OUT, C_RESET);
-    char *execution_command = malloc((strlen(OUT) + strlen(ML_RUN) + 2)*sizeof(char));
-    if(execution_command == NULL) { 
-        fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
-        return -1;
-    }
-    strcpy(execution_command, ML_RUN);
-    strcat(execution_command, " ");
-    strcat(execution_command, OUT);
+    fputs(C_CYAN "=> Executing " OUT C_RESET "\n", stdout);
 
-    int execution_response = system(execution_command);
-    free(execution_command);
-    if (WIFSIGNALED(execution_response) && (WTERMSIG(execution_response) == SIGINT)) {
-        handle_sigint(2);
-    } else if(execution_response != 0) {
-        fprintf(stderr, "%s%s[ERROR] Failed to execute the compiled code.%s\n", C_RED, C_BOLD, C_RESET);
+    bool execution_success = fork_exec(ML_RUN, (char *[]){ML_RUN, OUT, NULL});
+    
+    if(!execution_success) {
+        LOG_GENERAL_ERROR("Failed to execute " OUT ".");
         return -1;
     }
 
     if(clean) {
         state = 3;
 
-        printf("%s=> Cleaning %s%s\n", C_CYAN, OUT, C_RESET);
+        fputs(C_CYAN "=> Cleaning " OUT C_RESET "\n", stdout);
         rm_compiled_code();
 
-	    char *clean_cmo_cmi = malloc(strlen(file)*sizeof(char) + 2);
-        if(clean_cmo_cmi == NULL) { 
-            fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
+        char *file_name = malloc(strlen(file) + 2);
+        if(file_name == NULL) {
+            LOG_MEMORY_ALLOCATION_FAILED;
             return -1;
         }
+        
+        strcpy(file_name, file);
+        
+        char *dot = strrchr(file_name, '.');
 
-	    int file_len = strlen(file);
-	    file[file_len - 1] = 'm';
-	    file[file_len - 2] = 'c';
-	    strcpy(clean_cmo_cmi, file);
-	
-	    char *clean_cmo = malloc(strlen(file)*sizeof(char) + 2);
-        if(clean_cmo == NULL) { 
-            fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
-            return -1;
-        }
+        strcpy(dot, ".cmo");
 
-	    strcpy(clean_cmo, clean_cmo_cmi);
-	    strcat(clean_cmo, "o");
-
-	    int clean_cmo_response = remove(clean_cmo);
-	    free(clean_cmo);
+	    int clean_cmo_response = remove(file_name);
 	    if(clean_cmo_response != 0) {
-            fprintf(stderr, "%s%s[ERROR] Failed to clean the .cmo file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+            LOG_GENERAL_ERROR("Failed to clean the .cmo file after execution.");
 	    }
 
-	    char *clean_cmi = malloc(strlen(file)*sizeof(char) + 2);
-        if(clean_cmi == NULL) { 
-            fprintf(stderr, "%s%s[ERROR] Some memory allocation failed, please retry...%s\n", C_RED, C_BOLD, C_RESET);
-            return -1;
-        }
-	    strcpy(clean_cmi, clean_cmo_cmi);
-	    strcat(clean_cmi, "i");
+        strcpy(dot, ".cmi");
 
-	    int clean_cmi_response = remove(clean_cmi);
-	    free(clean_cmi);
+	    int clean_cmi_response = remove(file_name); 
 	    if(clean_cmi_response != 0) {
-            fprintf(stderr, "%s%s[ERROR] Failed to clean the .cmi file after execution.%s\n", C_RED, C_BOLD, C_RESET);
+            LOG_GENERAL_ERROR("Failed to clean the .cmi file after execution.");
             return -1;
 	    } 
 
-        free(clean_cmo_cmi);
+        free(file_name);
     }
 
     return 0;
