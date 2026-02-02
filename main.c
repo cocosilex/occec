@@ -33,7 +33,7 @@ bool fork_exec(char *command, char **args);
 void filter_args(int n, char **args, char **file, char **occec_args, char **compilation_args);
 char *add_arg(char *dest, char *arg);
 int get_mode(char *file);
-char **build_compilation_args(char *file, char *compiler, char *compilation_args, char *base_args);
+char **build_compilation_args(char *file, char *compiler, char *compilation_args, unsigned b_args_count, char **base_args);
 void free_args(char **args);
 void rm_compiled_code(void);
 int c_compile_run_clean(char *file, char *compilation_args, bool clean);
@@ -198,8 +198,8 @@ int get_mode(char *file) {
     return -1;
 }
 
-char **build_compilation_args(char *file, char *compiler, char *compilation_args, char *base_args) {
-    int max_args = 7;
+char **build_compilation_args(char *file, char *compiler, char *compilation_args, unsigned b_args_count, char **base_args) {
+    int max_args = 6 + b_args_count;
     char **args = malloc(max_args * sizeof(char *));
     if(args == NULL) {
         return NULL;
@@ -211,7 +211,11 @@ char **build_compilation_args(char *file, char *compiler, char *compilation_args
     args[i++] = strdup("-o");
     args[i++] = strdup(OUT);
 
-    args[i++] = strdup(base_args);
+    for(unsigned j = 0; j < b_args_count; j++) {
+        args[i + j] = strdup(base_args[j]);
+    }
+    i += b_args_count;
+
     if(compilation_args != NULL) {
         args[i++] = strdup(compilation_args);
     }
@@ -239,9 +243,9 @@ void rm_compiled_code(void) {
 }
 
 int c_compile_run_clean(char *file, char *compilation_args, bool clean) {
-    char *useful_c_args = "-Wall -Wextra -fsanitize=address";
+    char *useful_c_args[] = {"-Wall", "-Wextra", "-fsanitize=address"};
 
-    char **compilation_command = build_compilation_args(file, C_COMPILER, compilation_args, useful_c_args);
+    char **compilation_command = build_compilation_args(file, C_COMPILER, compilation_args, 3, useful_c_args);
     if(compilation_command == NULL) {
         LOG_MEMORY_ALLOCATION_FAILED; 
         return -1;
@@ -286,8 +290,8 @@ int c_compile_run_clean(char *file, char *compilation_args, bool clean) {
 }
 
 int ocaml_compile_run_clean(char *file, char *compilation_args, bool clean) {
-    char *useful_ml_args = "";
-    char **compilation_command = build_compilation_args(file, ML_COMPILER, compilation_args, useful_ml_args);
+    char *useful_ml_args []= {"placeholder :)"};
+    char **compilation_command = build_compilation_args(file, ML_COMPILER, compilation_args, 0, useful_ml_args);
     if(compilation_command == NULL) { 
         LOG_MEMORY_ALLOCATION_FAILED;
         return -1;

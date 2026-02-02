@@ -1,6 +1,6 @@
 CC = clang
 
-FLAGS = -Wall -Wextra -Wshadow -Wpedantic -fsanitize=address
+FLAGS = -Wall -Wextra -Wshadow -Wpedantic -fsanitize=address -g
 
 SRC = main.c
 OUT = occec
